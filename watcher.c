@@ -9,17 +9,19 @@
 typedef struct Device
 {
     char *path;
-    char *name;
+    char *model;
+    char *vendor;
     struct Device *next, *prev;
 } Device;
 
 Device *first_dev, *last_dev;
 ca_context *audioctx;
 
-Device *add_device(const char *path, const char *name)
+Device *add_device(const char *path, const char *model, const char *vendor)
 {
     Device *dev = malloc(sizeof(Device));
-    dev->name = strdup(name);
+    dev->model = strdup(model);
+    dev->vendor = strdup(vendor);
     dev->path = strdup(path);
     dev->next = 0;
     dev->prev = 0;
@@ -51,7 +53,8 @@ void remove_device(Device *dev)
     if (dev == last_dev)
         last_dev = dev->prev;
 
-    free(dev->name);
+    free(dev->model);
+    free(dev->vendor);
     free(dev->path);
     free(dev);
 }
@@ -81,7 +84,7 @@ Device *find_device_name(const char *name)
     Device *dev = first_dev;
     do
     {
-        if (strcmp(dev->name, name) == 0)
+        if (strcmp(dev->model, name) == 0)
             return dev;
 
         dev = dev->next;
@@ -104,11 +107,9 @@ void sound_done(ca_context *c, uint32_t id, int error_code, void *userdata)
 
 void play_sound(int added)
 {
-    const char *eventID = added ? "device-added" : "device-removed";
-
     ca_proplist *props;
     ca_proplist_create(&props);
-    ca_proplist_sets(props, CA_PROP_EVENT_ID, eventID);
+    ca_proplist_sets(props, CA_PROP_EVENT_ID, added ? "device-added" : "device-removed");
     ca_proplist_sets(props, CA_PROP_EVENT_DESCRIPTION, added ? "Device plugged in" : "Device unplugged");
     ca_proplist_sets(props, CA_PROP_CANBERRA_VOLUME, "10.0");
 
@@ -118,8 +119,11 @@ void play_sound(int added)
 
 void notify_connection(Device *dev, int added)
 {
-    const char *msg = added ? "Plugged in" : "Unplugged";
-    NotifyNotification *notif = notify_notification_new(msg, dev->name, 0);
+    const char *title = added ? "Plugged in" : "Unplugged";
+    char *body = malloc(strlen(dev->model) + strlen(dev->vendor) + 2);
+    sprintf(body, "%s\n%s", dev->vendor, dev->model);
+
+    NotifyNotification *notif = notify_notification_new(title, body, 0);
     notify_notification_show(notif, 0);
     g_object_unref(notif);
 
@@ -179,16 +183,18 @@ int main()
         if (strcmp(action, "add") == 0 && !device)
         {
             const char *model = udev_device_get_property_value(dev, "ID_MODEL_FROM_DATABASE");
+            const char *vendor = udev_device_get_property_value(dev, "ID_VENDOR_FROM_DATABASE");
+
             if (model)
             {
-                const char *vendor = udev_device_get_sysattr_value(dev, "idVendor");
-                const char *product = udev_device_get_sysattr_value(dev, "idProduct");
+                const char *vendorID = udev_device_get_sysattr_value(dev, "idVendor");
+                const char *productID = udev_device_get_sysattr_value(dev, "idProduct");
 
-                if (!should_ignore(vendor, product))
+                if (!should_ignore(vendorID, productID))
                 {
-                    printf("added device %s:%s: %s at %s\n", vendor, product, model, path);
+                    printf("added device %s:%s: %s at %s\n", vendorID, productID, vendor, path);
 
-                    Device *dev = add_device(path, model);
+                    Device *dev = add_device(path, model, vendor);
                     notify_connection(dev, 1);
                 }
             }
@@ -196,7 +202,7 @@ int main()
 
         if (strcmp(action, "remove") == 0 && device)
         {
-            printf("removed device: %s\n", device->name);
+            printf("removed device: %s\n", device->model);
 
             notify_connection(device, 0);
 
