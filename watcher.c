@@ -3,6 +3,8 @@
 #include <fcntl.h>
 #include <string.h>
 #include <malloc.h>
+#include <libnotify/notify.h>
+#include <canberra.h>
 
 typedef struct Device
 {
@@ -12,8 +14,9 @@ typedef struct Device
 } Device;
 
 Device *first_dev, *last_dev;
+ca_context *audioctx;
 
-void add_device(const char *path, const char *name)
+Device *add_device(const char *path, const char *name)
 {
     Device *dev = malloc(sizeof(Device));
     dev->name = strdup(name);
@@ -32,6 +35,8 @@ void add_device(const char *path, const char *name)
         dev->prev = last_dev;
         last_dev = dev;
     }
+
+    return dev;
 }
 
 void remove_device(Device *dev)
@@ -93,12 +98,51 @@ int should_ignore(const char *vendor, const char *product)
     return strcmp(vendor, "1a40") == 0 && strcmp(product, "0101") == 0;
 }
 
+void sound_done(ca_context *c, uint32_t id, int error_code, void *userdata)
+{
+}
+
+void play_sound(int added)
+{
+    const char *eventID = added ? "device-added" : "device-removed";
+
+    ca_proplist *props;
+    ca_proplist_create(&props);
+    ca_proplist_sets(props, CA_PROP_EVENT_ID, eventID);
+    ca_proplist_sets(props, CA_PROP_EVENT_DESCRIPTION, added ? "Device plugged in" : "Device unplugged");
+    ca_proplist_sets(props, CA_PROP_CANBERRA_VOLUME, "10.0");
+
+    ca_context_play_full(audioctx, 0, props, sound_done, props);
+    ca_proplist_destroy(props);
+}
+
+void notify_connection(Device *dev, int added)
+{
+    const char *msg = added ? "Plugged in" : "Unplugged";
+    NotifyNotification *notif = notify_notification_new(msg, dev->name, 0);
+    notify_notification_show(notif, 0);
+    g_object_unref(notif);
+
+    play_sound(added);
+}
+
 int main()
 {
     setlinebuf(stdout);
 
-    struct udev *ctx = udev_new();
+    if (!notify_init("USB Notify"))
+    {
+        printf("failed to initialize libnotify\n");
+        return 1;
+    }
 
+    if (ca_context_create(&audioctx) != 0)
+    {
+        printf("failed to create audio context");
+        return 1;
+    }
+
+    struct udev *ctx = udev_new();
     struct udev_monitor *mon = udev_monitor_new_from_netlink(ctx, "udev");
 
     int ret = udev_monitor_enable_receiving(mon);
@@ -144,7 +188,8 @@ int main()
                 {
                     printf("added device %s:%s: %s at %s\n", vendor, product, model, path);
 
-                    add_device(path, model);
+                    Device *dev = add_device(path, model);
+                    notify_connection(dev, 1);
                 }
             }
         }
@@ -153,11 +198,15 @@ int main()
         {
             printf("removed device: %s\n", device->name);
 
+            notify_connection(device, 0);
+
             remove_device(device);
         }
 
         udev_device_unref(dev);
     }
+
+    notify_uninit();
 
     udev_monitor_unref(mon);
     udev_unref(ctx);
