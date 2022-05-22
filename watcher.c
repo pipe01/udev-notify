@@ -160,6 +160,8 @@ int main()
     int flags = fcntl(fd, F_GETFL);
     fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 
+    printf("watching devices\n");
+
     while (1)
     {
         struct udev_device *dev = udev_monitor_receive_device(mon);
