@@ -13,7 +13,7 @@ typedef struct Device
 
 Device *first_dev, *last_dev;
 
-void add_device(const char* path, const char* name)
+void add_device(const char *path, const char *name)
 {
     Device *dev = malloc(sizeof(Device));
     dev->name = strdup(name);
@@ -51,9 +51,9 @@ void remove_device(Device *dev)
     free(dev);
 }
 
-Device* find_device_path(const char *path)
+Device *find_device_path(const char *path)
 {
-    if (!first_dev)
+    if (!first_dev || !path)
         return 0;
 
     Device *dev = first_dev;
@@ -68,7 +68,7 @@ Device* find_device_path(const char *path)
     return 0;
 }
 
-Device* find_device_name(const char *name)
+Device *find_device_name(const char *name)
 {
     if (!first_dev)
         return 0;
@@ -83,6 +83,14 @@ Device* find_device_name(const char *name)
     } while (dev);
 
     return 0;
+}
+
+int should_ignore(const char *vendor, const char *product)
+{
+    if (!vendor || !product)
+        return 1;
+
+    return strcmp(vendor, "1a40") == 0 && strcmp(product, "0101") == 0;
 }
 
 int main()
@@ -113,25 +121,37 @@ int main()
             continue;
         }
 
-        const char *path = udev_device_get_devpath(dev);
+        const char *path = udev_device_get_property_value(dev, "ID_PATH");
+        if (!path)
+        {
+            udev_device_unref(dev);
+            continue;
+        }
+
         const char *action = udev_device_get_action(dev);
 
-        Device* device = find_device_path(path);
+        Device *device = find_device_path(path);
 
         if (strcmp(action, "add") == 0 && !device)
         {
-            const char *name = udev_device_get_property_value(dev, "ID_MODEL_FROM_DATABASE");
-            if (name && !find_device_name(name))
+            const char *model = udev_device_get_property_value(dev, "ID_MODEL_FROM_DATABASE");
+            if (model)
             {
-                printf("%s device: %s at %s\n", action, name, path);
+                const char *vendor = udev_device_get_sysattr_value(dev, "idVendor");
+                const char *product = udev_device_get_sysattr_value(dev, "idProduct");
 
-                add_device(path, name);
+                if (!should_ignore(vendor, product))
+                {
+                    printf("added device %s:%s: %s at %s\n", vendor, product, model, path);
+
+                    add_device(path, model);
+                }
             }
         }
 
         if (strcmp(action, "remove") == 0 && device)
         {
-            printf("remove device: %s\n", device->name);
+            printf("removed device: %s\n", device->name);
 
             remove_device(device);
         }
