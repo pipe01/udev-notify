@@ -6,6 +6,11 @@
 #include <libnotify/notify.h>
 #include <canberra.h>
 
+#include <unistd.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/signalfd.h>
+
 typedef struct Device
 {
     char *path;
@@ -130,8 +135,27 @@ void notify_connection(Device *dev, int added)
     play_sound(added);
 }
 
+int create_signalfd(int *fd)
+{
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGQUIT);
+
+    if (sigprocmask(SIG_BLOCK, &mask, NULL) == -1)
+        return 1;
+
+    *fd = signalfd(-1, &mask, 0);
+    if (*fd == -1)
+        return 1;
+
+    return 0;
+}
+
 int main()
 {
+    int exit_code = 0;
+
     setlinebuf(stdout);
 
     if (!notify_init("USB Notify"))
@@ -152,22 +176,61 @@ int main()
     int ret = udev_monitor_enable_receiving(mon);
     if (ret < 0)
     {
-        printf("Failed to enable receiving: %d\n", ret);
+        printf("failed to enable receiving: %d\n", ret);
         return 1;
     }
 
-    int fd = udev_monitor_get_fd(mon);
-    int flags = fcntl(fd, F_GETFL);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    int udev_fd = udev_monitor_get_fd(mon);
+    int sig_fd = 0;
+
+    if (create_signalfd(&sig_fd) != 0)
+    {
+        printf("failed to create signal fd\n");
+        return 1;
+    }
+
+    struct pollfd *fds = calloc(2, sizeof(struct pollfd));
+    fds[0].fd = udev_fd;
+    fds[0].events = POLLIN;
+    fds[1].fd = sig_fd;
+    fds[1].events = POLLIN;
 
     printf("watching devices\n");
 
     while (1)
     {
+        int n = poll(fds, 2, -1);
+
+        if (n == -1)
+        {
+            printf("failed to poll for devices");
+            exit_code = 1;
+            break;
+        }
+        if (n == 0)
+            continue;
+
+        if (fds[1].revents & POLLIN)
+        {
+            struct signalfd_siginfo fdsi;
+            ssize_t n = read(sig_fd, &fdsi, sizeof(fdsi));
+
+            if (n == sizeof(fdsi) && fdsi.ssi_signo == SIGINT || fdsi.ssi_signo == SIGQUIT)
+            {
+                exit_code = 0;
+                break;
+            }
+
+            continue;
+        }
+
+        if (!(fds[0].revents & POLLIN))
+            continue;
+
         struct udev_device *dev = udev_monitor_receive_device(mon);
         if (dev == 0)
         {
-            printf("Failed to get device\n");
+            printf("failed to receive device\n");
             continue;
         }
 
@@ -201,8 +264,7 @@ int main()
                 }
             }
         }
-
-        if (strcmp(action, "remove") == 0 && device)
+        else if (strcmp(action, "remove") == 0 && device)
         {
             printf("removed device: %s\n", device->model);
 
@@ -214,8 +276,14 @@ int main()
         udev_device_unref(dev);
     }
 
+    printf("exiting\n");
+
+    free(fds);
+
     notify_uninit();
 
     udev_monitor_unref(mon);
     udev_unref(ctx);
+
+    return exit_code;
 }
